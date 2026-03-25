@@ -146,7 +146,8 @@ _CONVERSION_LABELS = {
     "Metadata": "Incrustando metadatos",
 }
 
-def download(url: str, output_dir: str, is_playlist: bool = False):
+def download(url: str, output_dir: str, is_playlist: bool = False,
+             playlist_name: str = "", total_tracks: int = 0):
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
@@ -161,17 +162,24 @@ def download(url: str, output_dir: str, is_playlist: bool = False):
     cmd.append(url)
 
     print()
-    info(f"Directorio de salida: {c(output_dir, YELLOW)}")
+    display_dir = str(out_path / playlist_name) if playlist_name else output_dir
+    info(f"Directorio de salida: {c(display_dir, YELLOW)}")
     print()
 
-    last_pct = -1.0
-    mid_line = False  # cursor está en línea de progreso sin \n
+    last_pct    = -1.0
+    mid_line    = False
+    current_trk = 0
 
     def end_line():
         nonlocal mid_line
         if mid_line:
             print()
             mid_line = False
+
+    def track_prefix() -> str:
+        if total_tracks:
+            return c(f"[{current_trk}/{total_tracks}] ", DIM)
+        return ""
 
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -180,11 +188,13 @@ def download(url: str, output_dir: str, is_playlist: bool = False):
             line = raw_line.rstrip()
             if m := _DEST_RE.search(line):
                 end_line()
-                print(f"  {c('↓', CYAN)} {c(Path(m.group(1)).name[:60], WHITE)}")
+                current_trk += 1
+                print(f"  {track_prefix()}{c('↓', CYAN)} {c(Path(m.group(1)).name[:55], WHITE)}")
                 last_pct = -1.0
             elif m := _ALREADY_RE.search(line):
                 end_line()
-                warn(f"Ya descargado: {Path(m.group(1)).name}")
+                current_trk += 1
+                warn(f"{track_prefix()}Ya descargado: {Path(m.group(1)).name}")
             elif m := _CONVERT_RE.search(line):
                 label = _CONVERSION_LABELS.get(m.group(1), m.group(1))
                 print(f"\r  {c('⚙', YELLOW)} {label}…" + " " * 20)
@@ -258,13 +268,15 @@ def action_download_playlist(cfg: dict):
     if not url:
         return warn("URL vacía, cancelando.")
     info("Obteniendo información de la playlist…")
-    entries = get_playlist_info(url)
+    entries  = get_playlist_info(url)
+    pl_title = ""
     if entries:
-        pl_title = entries[0].get("playlist_title") or entries[0].get("playlist") or "Playlist"
+        pl_title = entries[0].get("playlist_title") or entries[0].get("playlist") or ""
         print()
-        print(c("  Playlist: ", DIM) + c(pl_title, BOLD, WHITE))
+        print(c("  Playlist: ", DIM) + c(pl_title or "Playlist", BOLD, WHITE))
     if _show_playlist_and_confirm(entries, "No se pudo obtener información de la playlist (se intentará descargar igual)."):
-        download(url, cfg["output_dir"], is_playlist=True)
+        download(url, cfg["output_dir"], is_playlist=True,
+                 playlist_name=pl_title, total_tracks=len(entries))
 
 def _search_and_download(cfg: dict, prompt: str, search_fn, is_playlist: bool):
     print()
@@ -296,13 +308,17 @@ def _search_and_download(cfg: dict, prompt: str, search_fn, is_playlist: bool):
         return error("No se pudo obtener la URL del resultado.")
     label = "Seleccionada" if is_playlist else "Seleccionado"
     info(f"{label}: {c(chosen.get('title', url), BOLD, WHITE)}")
+    pl_name, pl_total = "", 0
     if is_playlist:
         print()
         info("Obteniendo contenido de la playlist…")
         entries = get_playlist_info(url)
         if not _show_playlist_and_confirm(entries, "No se pudo obtener el contenido de la playlist (se intentará descargar igual)."):
             return
-    download(url, cfg["output_dir"], is_playlist=is_playlist)
+        pl_name  = chosen.get("title", "")
+        pl_total = len(entries)
+    download(url, cfg["output_dir"], is_playlist=is_playlist,
+             playlist_name=pl_name, total_tracks=pl_total)
 
 def action_search(cfg: dict):
     _search_and_download(cfg, "Nombre de la canción", search_youtube, is_playlist=False)
