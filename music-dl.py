@@ -8,8 +8,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ─── ANSI Colors ────────────────────────────────────────────────────────────
-
 RESET   = "\033[0m"
 BOLD    = "\033[1m"
 DIM     = "\033[2m"
@@ -21,30 +19,23 @@ MAGENTA = "\033[35m"
 CYAN    = "\033[36m"
 WHITE   = "\033[37m"
 
-def c(text, *codes):
-    return "".join(codes) + str(text) + RESET
-
-def clear():
-    print("\033[2J\033[H", end="", flush=True)
+def c(text, *codes):      return "".join(codes) + str(text) + RESET
+def clear():              print("\033[2J\033[H", end="", flush=True)
+def info(msg):            print(c("  ● ", CYAN)   + msg)
+def success(msg):         print(c("  ✔ ", GREEN)  + msg)
+def warn(msg):            print(c("  ⚠ ", YELLOW) + msg)
+def error(msg):           print(c("  ✖ ", RED)    + msg)
+def sep():                print(c("  " + "─" * 40, DIM, BLUE))
 
 def banner():
     print()
     print(c("  ♪ music-dl ", BOLD, CYAN) + c("— YouTube → MP3 downloader", DIM, WHITE))
-    print(c("  " + "─" * 40, DIM, BLUE))
+    sep()
     print()
-
-def info(msg):    print(c("  ● ", CYAN)  + msg)
-def success(msg): print(c("  ✔ ", GREEN) + msg)
-def warn(msg):    print(c("  ⚠ ", YELLOW) + msg)
-def error(msg):   print(c("  ✖ ", RED)   + msg)
-def sep():        print(c("  " + "─" * 40, DIM, BLUE))
-
-# ─── Config ──────────────────────────────────────────────────────────────────
 
 CONFIG_DIR  = Path.home() / ".config" / "music-dl"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_DIR = Path.home() / "Música"
-
 YES_RESPONSES = ("s", "si", "sí", "y", "yes")
 
 def load_config() -> dict:
@@ -59,25 +50,20 @@ def save_config(cfg: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
 
-# ─── Dependency check ────────────────────────────────────────────────────────
+_INSTALL_HINTS = {
+    "yt-dlp": "sudo pacman -S yt-dlp  " + c("o", DIM) + "  pipx install yt-dlp",
+    "ffmpeg": "sudo pacman -S ffmpeg",
+}
 
 def check_deps():
-    missing = []
-    for dep in ("yt-dlp", "ffmpeg"):
-        if shutil.which(dep) is None:
-            missing.append(dep)
+    missing = [d for d in _INSTALL_HINTS if shutil.which(d) is None]
     if missing:
         error(f"Dependencias faltantes: {', '.join(missing)}")
         print()
         for dep in missing:
-            if dep == "yt-dlp":
-                print(c("    Instalar: ", DIM) + "sudo pacman -S yt-dlp  " + c("o", DIM) + "  pipx install yt-dlp")
-            elif dep == "ffmpeg":
-                print(c("    Instalar: ", DIM) + "sudo pacman -S ffmpeg")
+            print(c("    Instalar: ", DIM) + _INSTALL_HINTS[dep])
         print()
         sys.exit(1)
-
-# ─── Shared helpers ──────────────────────────────────────────────────────────
 
 def fmt_duration(secs) -> str:
     if secs is None:
@@ -90,27 +76,33 @@ def fmt_duration(secs) -> str:
 def _parse_json_lines(text: str) -> list[dict]:
     entries = []
     for line in text.strip().splitlines():
-        line = line.strip()
-        if line:
+        if line := line.strip():
             try:
                 entries.append(json.loads(line))
             except json.JSONDecodeError:
                 pass
     return entries
 
+def _run_ytdlp(args: list[str], timeout: int = 30) -> list[dict]:
+    try:
+        r = subprocess.run(["yt-dlp"] + args, capture_output=True, text=True, timeout=timeout)
+        if r.returncode == 0:
+            return _parse_json_lines(r.stdout)
+    except (subprocess.TimeoutExpired, Exception):
+        pass
+    return []
+
 def _confirm(prompt: str) -> bool:
-    resp = input(c(f"  {prompt} [s/N]: ", YELLOW)).strip().lower()
-    return resp in YES_RESPONSES
+    return input(c(f"  {prompt} [s/N]: ", YELLOW)).strip().lower() in YES_RESPONSES
 
 def _normalize_yt_url(raw: str, is_playlist: bool = False) -> str:
     if raw.startswith("http"):
         return raw
-    if is_playlist:
-        return f"https://www.youtube.com/playlist?list={raw}"
-    return f"https://www.youtube.com/watch?v={raw}"
+    return f"https://www.youtube.com/playlist?list={raw}" if is_playlist \
+           else f"https://www.youtube.com/watch?v={raw}"
 
-def _pick_from_results(results: list[dict], max_option: int) -> int | None:
-    choice = input(c(f"  Elegir número (1-{max_option}) o Enter para cancelar: ", YELLOW)).strip()
+def _pick_from_results(results: list[dict]) -> int | None:
+    choice = input(c(f"  Elegir número (1-{len(results)}) o Enter para cancelar: ", YELLOW)).strip()
     if not choice:
         return None
     try:
@@ -122,70 +114,25 @@ def _pick_from_results(results: list[dict], max_option: int) -> int | None:
         error("Opción inválida.")
         return None
 
-# ─── yt-dlp helpers ──────────────────────────────────────────────────────────
-
 def get_info(url: str) -> dict | None:
-    """Fetch single-video metadata without downloading."""
-    try:
-        result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--no-playlist", url],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return _parse_json_lines(result.stdout)[0]
-    except (subprocess.TimeoutExpired, Exception):
-        pass
-    return None
+    entries = _run_ytdlp(["--dump-json", "--no-playlist", url])
+    return entries[0] if entries else None
 
 def get_playlist_info(url: str) -> list[dict]:
-    """Fetch all entries in a playlist."""
-    try:
-        result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--flat-playlist", url],
-            capture_output=True, text=True, timeout=60
-        )
-        if result.returncode == 0:
-            return _parse_json_lines(result.stdout)
-    except (subprocess.TimeoutExpired, Exception):
-        pass
-    return []
+    return _run_ytdlp(["--dump-json", "--flat-playlist", url], timeout=60)
 
-def search_youtube(query: str, max_results: int = 5) -> list[dict]:
-    """Search YouTube and return up to max_results video entries."""
-    try:
-        result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--flat-playlist",
-             "--playlist-end", str(max_results),
-             f"ytsearch{max_results}:{query}"],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
-            return _parse_json_lines(result.stdout)[:max_results]
-    except (subprocess.TimeoutExpired, Exception):
-        pass
-    return []
+def search_youtube(query: str, n: int = 5) -> list[dict]:
+    return _run_ytdlp(["--dump-json", "--flat-playlist", "--playlist-end", str(n),
+                       f"ytsearch{n}:{query}"])[:n]
 
-def search_youtube_playlists(query: str, max_results: int = 5) -> list[dict]:
-    """Search YouTube for playlists and return up to max_results entries."""
-    try:
-        result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--flat-playlist",
-             "--playlist-end", str(max_results),
-             f"ytsearchdate{max_results}:{query} playlist"],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
-            entries = _parse_json_lines(result.stdout)
-            playlists = [e for e in entries if
-                         e.get("ie_key") in ("YoutubeTab", "YoutubePlaylist")
-                         or "list=" in (e.get("url") or "")
-                         or e.get("playlist_id")]
-            return (playlists or entries)[:max_results]
-    except (subprocess.TimeoutExpired, Exception):
-        pass
-    return []
-
-# ─── Download with live progress ─────────────────────────────────────────────
+def search_youtube_playlists(query: str, n: int = 5) -> list[dict]:
+    entries = _run_ytdlp(["--dump-json", "--flat-playlist", "--playlist-end", str(n),
+                          f"ytsearchdate{n}:{query} playlist"])
+    playlists = [e for e in entries if
+                 e.get("ie_key") in ("YoutubeTab", "YoutubePlaylist")
+                 or "list=" in (e.get("url") or "")
+                 or e.get("playlist_id")]
+    return (playlists or entries)[:n]
 
 _PROGRESS_RE = re.compile(
     r'\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*([\d.]+\w+)\s+at\s+([\d.]+\w+/s)\s+ETA\s+([\d:]+)'
@@ -193,40 +140,22 @@ _PROGRESS_RE = re.compile(
 _DEST_RE    = re.compile(r'\[download\] Destination: (.+)')
 _ALREADY_RE = re.compile(r'\[download\] (.+) has already been downloaded')
 _CONVERT_RE = re.compile(r'\[(\w+)\] (?:Destination|Converting|Embedding)')
-
 _CONVERSION_LABELS = {
-    "ffmpeg":         "Convirtiendo a MP3",
+    "ffmpeg": "Convirtiendo a MP3",
     "EmbedThumbnail": "Incrustando carátula",
-    "Metadata":       "Incrustando metadatos",
+    "Metadata": "Incrustando metadatos",
 }
 
-def _progress_bar(pct: float, width: int = 30) -> str:
-    filled = int(width * pct / 100)
-    bar = "█" * filled + "░" * (width - filled)
-    return c(bar, GREEN if pct >= 100 else CYAN)
-
 def download(url: str, output_dir: str, is_playlist: bool = False):
-    """Run yt-dlp and display live progress."""
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    if is_playlist:
-        template = str(out_path / "%(playlist)s" / "%(artist)s - %(title)s.%(ext)s")
-    else:
-        template = str(out_path / "%(artist)s - %(title)s.%(ext)s")
+    subdir   = "%(playlist)s/" if is_playlist else ""
+    template = str(out_path / f"{subdir}%(artist)s - %(title)s.%(ext)s")
 
-    cmd = [
-        "yt-dlp",
-        "--extract-audio",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",
-        "--embed-metadata",
-        "--embed-thumbnail",
-        "--add-metadata",
-        "--output", template,
-        "--newline",
-        "--progress",
-    ]
+    cmd = ["yt-dlp", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
+           "--embed-metadata", "--embed-thumbnail", "--add-metadata",
+           "--output", template, "--newline", "--progress"]
     if not is_playlist:
         cmd += ["--no-playlist"]
     cmd.append(url)
@@ -236,100 +165,81 @@ def download(url: str, output_dir: str, is_playlist: bool = False):
     print()
 
     last_pct = -1.0
+    mid_line = False  # cursor está en línea de progreso sin \n
+
+    def end_line():
+        nonlocal mid_line
+        if mid_line:
+            print()
+            mid_line = False
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1)
         for raw_line in proc.stdout:
             line = raw_line.rstrip()
-
-            m = _DEST_RE.search(line)
-            if m:
-                print(f"\r  {c('↓', CYAN)} {c(Path(m.group(1)).name[:60], WHITE)}")
+            if m := _DEST_RE.search(line):
+                end_line()
+                print(f"  {c('↓', CYAN)} {c(Path(m.group(1)).name[:60], WHITE)}")
                 last_pct = -1.0
-                continue
-
-            m = _ALREADY_RE.search(line)
-            if m:
+            elif m := _ALREADY_RE.search(line):
+                end_line()
                 warn(f"Ya descargado: {Path(m.group(1)).name}")
-                continue
-
-            m = _CONVERT_RE.search(line)
-            if m:
+            elif m := _CONVERT_RE.search(line):
                 label = _CONVERSION_LABELS.get(m.group(1), m.group(1))
                 print(f"\r  {c('⚙', YELLOW)} {label}…" + " " * 20)
-                continue
-
-            m = _PROGRESS_RE.search(line)
-            if m:
+                mid_line = False
+            elif m := _PROGRESS_RE.search(line):
                 pct = float(m.group(1))
                 if abs(pct - last_pct) >= 0.5 or pct >= 100:
                     last_pct = pct
-                    print(
-                        f"\r  {_progress_bar(pct)} {c(f'{pct:5.1f}%', BOLD)} "
-                        f"{c(m.group(2), DIM)} {c('@', DIM)} {c(m.group(3), GREEN)} "
-                        f"ETA {c(m.group(4), YELLOW)}    ",
-                        end="", flush=True
-                    )
-                continue
-
-            if line.startswith("[error]") or "ERROR" in line:
-                print()
-                error(line)
-            elif line.startswith("[warning]") or "WARNING" in line:
-                print()
-                warn(line)
+                    filled = int(30 * pct / 100)
+                    bar = c("█" * filled + "░" * (30 - filled), GREEN if pct >= 100 else CYAN)
+                    print(f"\r  {bar} {c(f'{pct:5.1f}%', BOLD)} "
+                          f"{c(m.group(2), DIM)} {c('@', DIM)} {c(m.group(3), GREEN)} "
+                          f"ETA {c(m.group(4), YELLOW)}    ", end="", flush=True)
+                    mid_line = True
+            elif "ERROR" in line or line.startswith("[error]"):
+                end_line(); error(line)
+            elif "WARNING" in line or line.startswith("[warning]"):
+                end_line(); warn(line)
 
         proc.wait()
-        print()
-
+        end_line()
         if proc.returncode == 0:
             success("Descarga completada.")
         else:
             error(f"yt-dlp terminó con código {proc.returncode}")
 
     except KeyboardInterrupt:
-        print()
+        end_line()
         warn("Descarga cancelada por el usuario.")
         proc.terminate()
 
-# ─── Shared playlist display + confirm ───────────────────────────────────────
-
 def _show_playlist_and_confirm(entries: list[dict], fallback_msg: str) -> bool:
-    if entries:
-        total = len(entries)
-        print()
-        print(c(f"  {total} canciones encontradas:", DIM, WHITE))
-        print()
-        for i, e in enumerate(entries[:10], 1):
-            title = (e.get("title") or e.get("id") or "?")[:55]
-            print(f"  {c(f'{i:>2}.', DIM)} {title}  {c(fmt_duration(e.get('duration')), DIM)}")
-        if total > 10:
-            print(c(f"  … y {total - 10} más", DIM))
-        print()
-        if not _confirm(f"¿Descargar las {total} canciones?"):
-            warn("Cancelado.")
-            return False
-        return True
-    else:
+    if not entries:
         warn(fallback_msg)
         return _confirm("¿Continuar de todas formas?")
-
-# ─── Menu actions ────────────────────────────────────────────────────────────
+    total = len(entries)
+    print()
+    print(c(f"  {total} canciones encontradas:", DIM, WHITE))
+    print()
+    for i, e in enumerate(entries[:10], 1):
+        title = (e.get("title") or e.get("id") or "?")[:55]
+        print(f"  {c(f'{i:>2}.', DIM)} {title}  {c(fmt_duration(e.get('duration')), DIM)}")
+    if total > 10:
+        print(c(f"  … y {total - 10} más", DIM))
+    print()
+    if not _confirm(f"¿Descargar las {total} canciones?"):
+        warn("Cancelado.")
+        return False
+    return True
 
 def action_download_song(cfg: dict):
     print()
     url = input(c("  URL de la canción: ", CYAN)).strip()
     if not url:
-        warn("URL vacía, cancelando.")
-        return
-
+        return warn("URL vacía, cancelando.")
     info("Obteniendo información…")
     meta = get_info(url)
     if meta:
@@ -340,117 +250,65 @@ def action_download_song(cfg: dict):
         print()
     else:
         warn("No se pudo obtener información previa (se intentará descargar igual).")
-
     download(url, cfg["output_dir"])
 
 def action_download_playlist(cfg: dict):
     print()
     url = input(c("  URL de la playlist: ", CYAN)).strip()
     if not url:
-        warn("URL vacía, cancelando.")
-        return
-
+        return warn("URL vacía, cancelando.")
     info("Obteniendo información de la playlist…")
     entries = get_playlist_info(url)
-
     if entries:
         pl_title = entries[0].get("playlist_title") or entries[0].get("playlist") or "Playlist"
         print()
         print(c("  Playlist: ", DIM) + c(pl_title, BOLD, WHITE))
+    if _show_playlist_and_confirm(entries, "No se pudo obtener información de la playlist (se intentará descargar igual)."):
+        download(url, cfg["output_dir"], is_playlist=True)
 
-    if not _show_playlist_and_confirm(entries, "No se pudo obtener información de la playlist (se intentará descargar igual)."):
-        return
-
-    download(url, cfg["output_dir"], is_playlist=True)
-
-def action_search(cfg: dict):
+def _search_and_download(cfg: dict, prompt: str, search_fn, is_playlist: bool):
     print()
-    query = input(c("  Nombre de la canción: ", CYAN)).strip()
+    query = input(c(f"  {prompt}: ", CYAN)).strip()
     if not query:
-        warn("Búsqueda vacía, cancelando.")
-        return
-
+        return warn("Búsqueda vacía, cancelando.")
     info(f"Buscando «{query}» en YouTube…")
-    results = search_youtube(query)
-
+    results = search_fn(query)
     if not results:
-        error("No se encontraron resultados.")
-        return
-
-    print()
-    for i, r in enumerate(results, 1):
-        title = (r.get("title") or r.get("id") or "?")[:55]
-        ch    = (r.get("uploader") or r.get("channel") or "")[:30]
-        print(
-            f"  {c(f'{i}.', BOLD, CYAN)} {c(title, WHITE)}\n"
-            f"      {c(ch, DIM)}  {c(fmt_duration(r.get('duration')), DIM)}"
-        )
-        print()
-
-    idx = _pick_from_results(results, len(results))
-    if idx is None:
-        return
-
-    chosen = results[idx]
-    video_url = _normalize_yt_url(
-        chosen.get("url") or chosen.get("webpage_url") or chosen.get("id") or ""
-    )
-    if not video_url:
-        error("No se pudo obtener la URL del resultado.")
-        return
-
-    info(f"Seleccionado: {c(chosen.get('title', video_url), BOLD, WHITE)}")
-    download(video_url, cfg["output_dir"])
-
-def action_search_playlist(cfg: dict):
-    print()
-    query = input(c("  Nombre de la playlist: ", CYAN)).strip()
-    if not query:
-        warn("Búsqueda vacía, cancelando.")
-        return
-
-    info(f"Buscando playlists «{query}» en YouTube…")
-    results = search_youtube_playlists(query)
-
-    if not results:
-        error("No se encontraron resultados.")
-        return
-
+        return error("No se encontraron resultados.")
     print()
     for i, r in enumerate(results, 1):
         title = (r.get("title") or r.get("id") or "?")[:55]
         ch    = (r.get("uploader") or r.get("channel") or r.get("playlist_uploader") or "")[:30]
-        count = r.get("playlist_count") or r.get("n_entries")
-        count_str = f"{count} canciones" if count else "? canciones"
-        print(
-            f"  {c(f'{i}.', BOLD, MAGENTA)} {c(title, WHITE)}\n"
-            f"      {c(ch, DIM)}  {c(count_str, DIM)}"
-        )
+        num_color = MAGENTA if is_playlist else CYAN
+        extra = fmt_duration(r.get("duration"))
+        if is_playlist:
+            count = r.get("playlist_count") or r.get("n_entries")
+            extra = f"{count} canciones" if count else "? canciones"
+        print(f"  {c(f'{i}.', BOLD, num_color)} {c(title, WHITE)}\n      {c(ch, DIM)}  {c(extra, DIM)}")
         print()
-
-    idx = _pick_from_results(results, len(results))
+    idx = _pick_from_results(results)
     if idx is None:
         return
+    chosen  = results[idx]
+    raw_url = chosen.get("url") or chosen.get("webpage_url") or chosen.get("id") or ""
+    url     = _normalize_yt_url(raw_url, is_playlist=is_playlist)
+    if not url:
+        return error("No se pudo obtener la URL del resultado.")
+    label = "Seleccionada" if is_playlist else "Seleccionado"
+    info(f"{label}: {c(chosen.get('title', url), BOLD, WHITE)}")
+    if is_playlist:
+        print()
+        info("Obteniendo contenido de la playlist…")
+        entries = get_playlist_info(url)
+        if not _show_playlist_and_confirm(entries, "No se pudo obtener el contenido de la playlist (se intentará descargar igual)."):
+            return
+    download(url, cfg["output_dir"], is_playlist=is_playlist)
 
-    chosen = results[idx]
-    pl_url = _normalize_yt_url(
-        chosen.get("url") or chosen.get("webpage_url") or chosen.get("id") or "",
-        is_playlist=True
-    )
-    if not pl_url:
-        error("No se pudo obtener la URL del resultado.")
-        return
+def action_search(cfg: dict):
+    _search_and_download(cfg, "Nombre de la canción", search_youtube, is_playlist=False)
 
-    info(f"Seleccionada: {c(chosen.get('title', pl_url), BOLD, WHITE)}")
-    print()
-
-    info("Obteniendo contenido de la playlist…")
-    entries = get_playlist_info(pl_url)
-
-    if not _show_playlist_and_confirm(entries, "No se pudo obtener el contenido de la playlist (se intentará descargar igual)."):
-        return
-
-    download(pl_url, cfg["output_dir"], is_playlist=True)
+def action_search_playlist(cfg: dict):
+    _search_and_download(cfg, "Nombre de la playlist", search_youtube_playlists, is_playlist=True)
 
 def action_change_dir(cfg: dict):
     print()
@@ -461,8 +319,6 @@ def action_change_dir(cfg: dict):
     cfg["output_dir"] = str(Path(new_dir).expanduser().resolve())
     save_config(cfg)
     success(f"Directorio actualizado: {c(cfg['output_dir'], YELLOW)}")
-
-# ─── Main menu ───────────────────────────────────────────────────────────────
 
 MENU_ITEMS = [
     ("1", "Descargar canción (URL)",      action_download_song),
@@ -488,38 +344,31 @@ def print_menu(cfg: dict):
 def main():
     check_deps()
     cfg = load_config()
-
     while True:
         try:
             clear()
             print_menu(cfg)
             choice = input(c("  » ", BOLD, CYAN)).strip()
-
             action = next((fn for key, _, fn in MENU_ITEMS if key == choice), ...)
-
             if choice == "0":
                 clear()
                 print(c("  Hasta luego ♪", DIM, CYAN))
                 print()
                 sys.exit(0)
-
             if action is ...:
                 if choice:
                     print()
                     warn(f"Opción «{choice}» no válida.")
                     input(c("  Pulsa Enter para continuar…", DIM))
                 continue
-
             clear()
             try:
                 action(cfg)
             except KeyboardInterrupt:
                 print()
                 warn("Operación cancelada.")
-
             sep()
             input(c("  Pulsa Enter para continuar…", DIM))
-
         except KeyboardInterrupt:
             clear()
             print(c("  Hasta luego ♪", DIM, CYAN))
